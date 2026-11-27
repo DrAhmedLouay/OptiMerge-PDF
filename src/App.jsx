@@ -7,6 +7,7 @@ import PreviewModal from './components/PreviewModal';
 import ResultSection from './components/ResultSection';
 import FeaturesBanner from './components/FeaturesBanner';
 import BatchCompressor from './components/BatchCompressor';
+import PdfToWord from './components/PdfToWord';
 import { translations } from './utils/translations';
 import { parseUploadedFile, mergeAndOptimizePdf } from './utils/pdfProcessor';
 import {
@@ -17,13 +18,14 @@ import {
   Layers,
   Files,
   Zap,
+  FileType2,
 } from 'lucide-react';
 
 export default function App() {
   const [lang, setLang] = useState('ar');
   const t = translations[lang];
 
-  // Active workflow tab: 'merge' or 'batch'
+  // Active workflow tab: 'merge' | 'batch' | 'pdf2word'
   const [activeTab, setActiveTab] = useState('merge');
 
   // Target Max Budget (Default 10 MB for guaranteed < 10MB file size)
@@ -190,10 +192,10 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         {/* Navigation Mode Tabs */}
         <div className="flex items-center justify-center">
-          <div className="bg-slate-900/80 p-1.5 rounded-2xl border border-slate-800 flex items-center gap-2 max-w-xl w-full">
+          <div className="bg-slate-900/80 p-1.5 rounded-2xl border border-slate-800 flex items-center gap-2 max-w-3xl w-full">
             <button
               onClick={() => setActiveTab('merge')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                 activeTab === 'merge'
                   ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -205,7 +207,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('batch')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                 activeTab === 'batch'
                   ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -213,9 +215,19 @@ export default function App() {
             >
               <Files className="w-4 h-4" />
               <span>{t.tabBatch}</span>
-              <span className="text-[10px] bg-emerald-400/20 text-emerald-300 px-1.5 py-0.5 rounded-md hidden sm:inline">
-                جديد
-              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('pdf2word')}
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                activeTab === 'pdf2word'
+                  ? 'bg-accent-500 text-white shadow-lg shadow-accent-500/20'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <FileType2 className="w-4 h-4" />
+              <span>{lang === 'ar' ? 'تحويل PDF إلى Word' : 'PDF to Word'}</span>
+              <span className="text-[10px] bg-blue-400/20 text-blue-200 px-1.5 py-0.5 rounded-md hidden sm:inline">جديد</span>
             </button>
           </div>
         </div>
@@ -228,8 +240,10 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 2: Batch Compression */}
-        {activeTab === 'batch' ? (
+        {/* Tab 3: PDF to Word */}
+        {activeTab === 'pdf2word' ? (
+          <PdfToWord t={t} lang={lang} />
+        ) : activeTab === 'batch' ? (
           <BatchCompressor t={t} lang={lang} />
         ) : (
           /* Tab 1: Merge & Compress into Single PDF */
