@@ -515,7 +515,20 @@ export async function mergeAndOptimizePdf(pages, options, onProgress) {
   const endTime = performance.now();
   const durationMs = Math.round(endTime - startTime);
 
-  const originalSize = pages.reduce((acc, p) => acc + (p.fileSize || 0), 0);
+  // Compute original size from unique source files (avoid counting same PDF file per page)
+  const seen = new Set();
+  let originalSize = 0;
+  for (const p of pages) {
+    if (p.fileType === 'pdf') {
+      const key = p.fileId;
+      if (!seen.has(key)) {
+        seen.add(key);
+        originalSize += p.fileSize || 0;
+      }
+    } else {
+      originalSize += p.fileSize || 0;
+    }
+  }
   const outputSize = pdfBytes.byteLength;
   const savingsBytes = Math.max(0, originalSize - outputSize);
   const savingsPercent =
