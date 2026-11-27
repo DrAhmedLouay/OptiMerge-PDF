@@ -2,7 +2,6 @@ import * as pdfjsLib from 'pdfjs-dist';
 import {
   Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType,
   Table, TableRow, TableCell, WidthType, BorderStyle,
-  TextWrappingType, HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
   PageBreak, ShadingType
 } from 'docx';
 
@@ -299,88 +298,6 @@ async function buildEditableSections(pdf, totalPages, onProgress) {
   return sections;
 }
 
-async function buildHybridSections(pdf, totalPages, onProgress) {
-  // Hybrid: page image BEHIND (preserves exact visual appearance) + transparent selectable text layer on top
-  const sections = [];
-  for (let i = 1; i <= totalPages; i++) {
-    onProgress?.({ current: i, total: totalPages, percentage: Math.round((i / totalPages) * 100), status: `بناء طبقة Hybrid قابلة للتحديد - صفحة ${i}/${totalPages}...` });
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.0 });
-    const ptW = viewport.width, ptH = viewport.height;
-
-    // 1) High-res background image (visual fidelity)
-    const rendered = await renderPageToPng(page, 2.2);
-
-    // 2) Extract text items for invisible selectable layer
-    const textContent = await page.getTextContent({ normalizeWhitespace: false });
-    const items = getTextItems(textContent, viewport);
-    const lines = groupIntoLines(items);
-
-    const children = [];
-
-    // Background image anchored to page behind text
-    children.push(new Paragraph({
-      spacing: { before: 0, after: 0, line: 1 },
-      children: [new ImageRun({
-        data: rendered.data,
-        transformation: { width: ptToPx96(ptW), height: ptToPx96(ptH) },
-        type: 'png',
-        floating: {
-          horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
-          verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
-          wrap: { type: TextWrappingType.BEHIND },
-          behindDocument: true,
-          zIndex: 0,
-        },
-      })],
-    }));
-
-    // Transparent selectable text overlay (white color, tiny but selectable - better: use exact position via spacing)
-    // We place text as normal paragraphs with minimal visibility tricks; use very light color close to white is bad over dark areas.
-    // Best practical approach: render text in normal black with 0pt outline? No. Use `color: "808080"`? visible.
-    // The user asked for "طبقة نص شفافة قابلة للتحديد" - we can use a very faint color or use the spec trick:
-    // set color to "FFFFFF" (white) - it's selectable when you drag over it. Over white bg invisible, over image it covers - not perfect.
-    // Better compromise: put text as editable paragraphs in a light transparent-ish approach is not supported. 
-    // We'll use color "FEFEFE" which is nearly invisible on white but still selectable; on dark image areas it will show faintly - acceptable tradeoff.
-    // More importantly, we place them as real editable TextRuns so user can select/copy/edit.
-    for (const line of lines) {
-      const rtl = line.isArabic;
-      const avgFont = line.fontSize || 11;
-      // Position approximation using before-spacing and indents
-      const leftIndentPt = Math.max(0, line.minX - 36);
-      let spacingBefore = 0;
-      // use a small spacing model
-      spacingBefore = 20;
-      const runs = line.items.map(it => new TextRun({
-        text: it.str + ' ',
-        size: ptToHalfPt(it.fontSize || avgFont),
-        font: normalizeFontName(it.fontName, rtl),
-        bold: !!it.bold,
-        italics: !!it.italic,
-        rightToLeft: rtl,
-        color: 'FDFDFD', // near-transparent white: selectable but minimally visible over background image
-      }));
-      if (runs.length) {
-        const last = line.items[line.items.length - 1];
-        runs[runs.length - 1] = new TextRun({ text: last.str, size: ptToHalfPt(last.fontSize || avgFont), font: normalizeFontName(last.fontName, rtl), bold: !!last.bold, italics: !!last.italic, rightToLeft: rtl, color: 'FDFDFD' });
-      }
-      children.push(new Paragraph({
-        bidirectional: rtl,
-        alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-        spacing: { before: spacingBefore, after: 0, line: 240 },
-        indent: rtl ? { right: ptToTwip(Math.max(0, ptW - line.maxX - 36)) } : { left: ptToTwip(leftIndentPt) },
-        children: runs,
-      }));
-    }
-
-    sections.push({
-      properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: ptToTwip(36), right: ptToTwip(36), bottom: ptToTwip(36), left: ptToTwip(36) } } },
-      children,
-    });
-  }
-  return sections;
-}
-
 async function buildVisualSections(pdf, totalPages, onProgress) {
   const sections = [];
   for (let i = 1; i <= totalPages; i++) {
@@ -398,15 +315,14 @@ async function buildVisualSections(pdf, totalPages, onProgress) {
 }
 
 export async function convertPdfToDocx(file, options = {}, onProgress) {
-  const { mode = 'hybrid' } = options; // 'editable' | 'hybrid' | 'visual'
+  const { mode = 'editable' } = options; // 'editable' | 'visual'
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
   const totalPages = pdf.numPages;
 
   let sections;
   if (mode === 'visual') sections = await buildVisualSections(pdf, totalPages, onProgress);
-  else if (mode === 'editable') sections = await buildEditableSections(pdf, totalPages, onProgress);
-  else sections = await buildHybridSections(pdf, totalPages, onProgress);
+  else sections = await buildEditableSections(pdf, totalPages, onProgress);
 
   const doc = new Document({
     creator: 'OptiMerge PDF',
