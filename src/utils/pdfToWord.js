@@ -2,7 +2,8 @@ import * as pdfjsLib from 'pdfjs-dist';
 import {
   Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType,
   Table, TableRow, TableCell, WidthType, BorderStyle,
-  HeadingLevel, PageBreak, convertMillimetersToTwip
+  TextWrappingType, HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
+  PageBreak, ShadingType
 } from 'docx';
 
 if (typeof window !== 'undefined') {
@@ -12,122 +13,122 @@ if (typeof window !== 'undefined') {
 }
 
 const ptToTwip = (pt) => Math.round(pt * 20);
-const ptToHalfPt = (pt) => Math.round(pt * 2); // docx font size is half-points
+const ptToHalfPt = (pt) => Math.max(12, Math.min(96, Math.round(pt * 2)));
+const ptToPx96 = (pt) => Math.round(pt * 96 / 72);
+const EMU_PER_PT = 12700;
+const ptToEmu = (pt) => Math.round(pt * EMU_PER_PT);
 
 function isArabic(text) {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text || '');
 }
 
-function normalizeFontName(pdfFontName) {
-  if (!pdfFontName) return 'Arial';
+function normalizeFontName(pdfFontName, rtl) {
+  if (!pdfFontName) return rtl ? 'Arial' : 'Arial';
   const name = pdfFontName.toLowerCase();
-  if (name.includes('arabic') || name.includes('amiri') || name.includes('naskh') || name.includes('kufi')) return 'Traditional Arabic';
-  if (name.includes('times')) return 'Times New Roman';
-  if (name.includes('courier') || name.includes('mono')) return 'Courier New';
+  if (name.includes('arabic') || name.includes('amiri') || name.includes('naskh') || name.includes('kufi') || name.includes('trado')) return 'Traditional Arabic';
+  if (name.includes('sakkal') || name.includes('tajawal') || name.includes('cairo') || name.includes('droid') || name.includes('noto')) return 'Arial';
+  if (name.includes('times') || name.includes('roman')) return 'Times New Roman';
+  if (name.includes('courier') || name.includes('mono') || name.includes('consol')) return 'Courier New';
   if (name.includes('calibri')) return 'Calibri';
   if (name.includes('tahoma')) return 'Tahoma';
-  if (name.includes('arial')) return 'Arial';
-  // Strip common prefixes like ABCDEF+FontName
-  const clean = pdfFontName.replace(/^[A-Z]{6}\+/, '');
-  return clean || 'Arial';
+  if (name.includes('arial') || name.includes('helvetica')) return 'Arial';
+  const clean = pdfFontName.replace(/^[A-Z]{6}\+/, '').replace(/[-_]?Bold|[-_]?Italic|[-_]?Regular|[-_]?Light/gi, '').trim();
+  return clean || (rtl ? 'Arial' : 'Arial');
 }
 
-function getTextContentItems(textContent, viewport) {
+function isBoldFont(name) { return /bold|black|heavy|demi|semibold/i.test(name || ''); }
+function isItalicFont(name) { return /italic|oblique/i.test(name || ''); }
+
+async function renderPageToPng(page, scale = 2.0) {
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  return {
+    data: new Uint8Array(await blob.arrayBuffer()),
+    ptWidth: viewport.width / scale,
+    ptHeight: viewport.height / scale,
+  };
+}
+
+function getTextItems(textContent, viewport) {
   const items = [];
   for (const item of textContent.items) {
     const str = item.str;
-    if (!str || !str.replace(/\s/g, '').length) {
-      // preserve spaces as markers
-      if (str === ' ') items.push({ type: 'space' });
-      continue;
-    }
+    if (!str) continue;
+    if (!str.replace(/\s/g, '').length) continue;
     const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    // tx: [scaleX, skewX, skewY, scaleY, x, y]
     const fontSize = Math.sqrt(tx[0] * tx[0] + tx[1] * tx[1]) || 11;
     const x = tx[4];
-    const y = tx[5]; // viewport y, increases downward
-    const w = (item.width || 0) * viewport.scale;
-    const h = (item.height || fontSize) * viewport.scale;
-    const fontName = textContent.styles?.[item.fontName]?.fontFamily || item.fontName || '';
+    const y = tx[5];
+    const w = Math.max(1, (item.width || 0) * viewport.scale);
+    const h = Math.max(1, (item.height || fontSize) * viewport.scale);
+    const rawFont = textContent.styles?.[item.fontName]?.fontFamily || item.fontName || '';
+    const rtl = isArabic(str);
     items.push({
-      str,
-      x,
-      y,
-      fontSize,
-      width: w,
-      height: h,
-      fontName: normalizeFontName(fontName),
-      isArabic: isArabic(str),
-      hasEOL: !!item.hasEOL,
+      str: str.replace(/\u00A0/g, ' '),
+      x, y, width: w, height: h, fontSize,
+      fontName: normalizeFontName(rawFont, rtl),
+      bold: isBoldFont(rawFont) || isBoldFont(item.fontName),
+      italic: isItalicFont(rawFont),
+      isArabic: rtl,
     });
   }
   return items;
 }
 
-function groupIntoLines(items, yToleranceFactor = 0.5) {
-  const sorted = [...items].filter(i => i.type !== 'space').sort((a, b) => a.y - b.y || a.x - b.x);
+function groupIntoLines(items) {
+  const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
   const lines = [];
   for (const item of sorted) {
-    const tol = Math.max(2, item.fontSize * yToleranceFactor);
+    const tol = Math.max(2.5, item.fontSize * 0.55);
     let line = lines.find(l => Math.abs(l.y - item.y) <= tol);
-    if (!line) {
-      line = { y: item.y, items: [] };
-      lines.push(line);
-    }
+    if (!line) { line = { y: item.y, items: [] }; lines.push(line); }
     line.items.push(item);
-    // update line y to average for stability
     line.y = line.items.reduce((s, it) => s + it.y, 0) / line.items.length;
   }
   lines.sort((a, b) => a.y - b.y);
   for (const line of lines) {
     line.items.sort((a, b) => a.x - b.x);
+    // merge adjacent items on same line into text runs with spacing
+    const merged = [];
+    for (const it of line.items) {
+      const last = merged[merged.length - 1];
+      if (last) {
+        const gap = it.x - (last.x + last.width);
+        if (gap > Math.max(2, it.fontSize * 0.35)) {
+          // add space if gap is significant
+          const spaces = gap > it.fontSize * 1.5 ? '  ' : ' ';
+          last.str += spaces + it.str;
+          last.width = (it.x + it.width) - last.x;
+          last.bold = last.bold || it.bold;
+          last.isArabic = last.isArabic || it.isArabic;
+        } else {
+          last.str += it.str;
+          last.width = (it.x + it.width) - last.x;
+          last.bold = last.bold || it.bold;
+          last.isArabic = last.isArabic || it.isArabic;
+        }
+      } else {
+        merged.push({ ...it });
+      }
+    }
+    line.items = merged;
     line.minX = Math.min(...line.items.map(i => i.x));
     line.maxX = Math.max(...line.items.map(i => i.x + i.width));
     line.fontSize = line.items.reduce((s, i) => s + i.fontSize, 0) / line.items.length;
-    line.text = line.items.map(i => i.str).join('');
+    line.text = line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
     line.isArabic = isArabic(line.text);
   }
-  return lines;
+  return lines.filter(l => l.text);
 }
 
-function detectTableBlocks(lines, pageWidth) {
-  // Heuristic: detect sequences of lines that have multiple distinct x-clusters (columns)
-  // and similar column boundaries across consecutive lines.
-  const blocks = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const clusters = clusterByX(line.items);
-    if (clusters.length >= 2) {
-      // try to extend table
-      const tableLines = [line];
-      let j = i + 1;
-      while (j < lines.length) {
-        const next = lines[j];
-        const nextClusters = clusterByX(next.items);
-        if (nextClusters.length >= 2 && columnsCompatible(clusters, nextClusters, pageWidth)) {
-          tableLines.push(next);
-          j++;
-        } else if (nextClusters.length === 1 && tableLines.length >= 2) {
-          // could be a spanning row inside table, be conservative
-          break;
-        } else {
-          break;
-        }
-      }
-      if (tableLines.length >= 2) {
-        blocks.push({ type: 'table', lines: tableLines });
-        i = j;
-        continue;
-      }
-    }
-    blocks.push({ type: 'para', line });
-    i++;
-  }
-  return blocks;
-}
-
-function clusterByX(items, gapThreshold = 18) {
+function clusterByX(items, gapThreshold) {
   if (!items.length) return [];
   const sorted = [...items].sort((a, b) => a.x - b.x);
   const clusters = [];
@@ -135,47 +136,61 @@ function clusterByX(items, gapThreshold = 18) {
   for (let k = 1; k < sorted.length; k++) {
     const it = sorted[k];
     const gap = it.x - cur.maxX;
-    if (gap > gapThreshold) {
-      clusters.push(cur);
-      cur = { items: [it], minX: it.x, maxX: it.x + it.width };
-    } else {
-      cur.items.push(it);
-      cur.maxX = Math.max(cur.maxX, it.x + it.width);
-    }
+    const thr = gapThreshold ?? Math.max(14, (it.fontSize || 11) * 1.8);
+    if (gap > thr) { clusters.push(cur); cur = { items: [it], minX: it.x, maxX: it.x + it.width }; }
+    else { cur.items.push(it); cur.maxX = Math.max(cur.maxX, it.x + it.width); }
   }
   clusters.push(cur);
   return clusters;
 }
 
+function detectTableBlocks(lines, pageWidth) {
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const clusters = clusterByX(line.items);
+    if (clusters.length >= 2) {
+      const tableLines = [line];
+      let j = i + 1;
+      while (j < lines.length) {
+        const next = lines[j];
+        const nextClusters = clusterByX(next.items);
+        if (nextClusters.length >= 2 && columnsCompatible(clusters, nextClusters, pageWidth)) {
+          tableLines.push(next); j++;
+        } else if (nextClusters.length === 1 && tableLines.length >= 2 && Math.abs(next.y - tableLines[tableLines.length-1].y) < (next.fontSize * 2.2)) {
+          // might be wrapped cell text - include as part of last row context? skip conservative
+          break;
+        } else break;
+      }
+      if (tableLines.length >= 2) { blocks.push({ type: 'table', lines: tableLines }); i = j; continue; }
+    }
+    blocks.push({ type: 'para', line }); i++;
+  }
+  return blocks;
+}
+
 function columnsCompatible(refClusters, clusters, pageWidth) {
   if (Math.abs(refClusters.length - clusters.length) > 1) return false;
-  // check overlap of column x ranges
   const refCenters = refClusters.map(c => (c.minX + c.maxX) / 2);
   const centers = clusters.map(c => (c.minX + c.maxX) / 2);
   let matches = 0;
-  for (const c of centers) {
-    if (refCenters.some(rc => Math.abs(rc - c) < pageWidth * 0.12)) matches++;
-  }
+  for (const c of centers) if (refCenters.some(rc => Math.abs(rc - c) < pageWidth * 0.10)) matches++;
   return matches >= Math.min(refCenters.length, centers.length) - 1;
 }
 
 function buildTableFromLines(tableLines, pageWidth) {
-  // Determine column boundaries from all lines
   const allClusters = tableLines.map(l => clusterByX(l.items));
   const maxCols = Math.max(...allClusters.map(c => c.length));
-  // Build reference column centers
   let refCenters = [];
-  for (const clusters of allClusters) {
-    if (clusters.length === maxCols) { refCenters = clusters.map(c => (c.minX + c.maxX) / 2); break; }
-  }
+  for (const clusters of allClusters) { if (clusters.length === maxCols) { refCenters = clusters.map(c => (c.minX + c.maxX) / 2); break; } }
   if (!refCenters.length) refCenters = allClusters[0].map(c => (c.minX + c.maxX) / 2);
-
   const colCount = refCenters.length;
-  const colWidthTwip = Math.floor(ptToTwip(pageWidth - 80) / colCount); // 40pt margins each side
+  const usableWidth = ptToTwip(pageWidth - 80);
+  const colWidth = Math.floor(usableWidth / colCount);
 
   const rows = tableLines.map(line => {
     const clusters = clusterByX(line.items);
-    // Map clusters to columns
     const cells = Array(colCount).fill(null).map(() => []);
     for (const cluster of clusters) {
       const center = (cluster.minX + cluster.maxX) / 2;
@@ -184,163 +199,220 @@ function buildTableFromLines(tableLines, pageWidth) {
       cells[bestCol].push(...cluster.items);
     }
     return new TableRow({
-      children: cells.map((cellItems) => {
-        const text = cellItems.sort((a,b)=>a.x-b.x).map(i => i.str).join(' ').trim();
+      children: cells.map(cellItems => {
+        const sorted = cellItems.sort((a,b)=>a.x-b.x);
+        const text = sorted.map(i => i.str).join(' ').replace(/\s+/g,' ').trim();
         const rtl = isArabic(text);
-        const fontSize = cellItems.length ? cellItems.reduce((s,i)=>s+i.fontSize,0)/cellItems.length : 11;
+        const fontSize = sorted.length ? sorted.reduce((s,i)=>s+i.fontSize,0)/sorted.length : 11;
+        const bold = sorted.some(i => i.bold);
         return new TableCell({
-          width: { size: colWidthTwip, type: WidthType.DXA },
+          width: { size: colWidth, type: WidthType.DXA },
           borders: {
-            top: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
-            bottom: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
-            left: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
-            right: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+            top: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
+            bottom: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
+            left: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
+            right: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
           },
-          margins: { top: 40, bottom: 40, left: 60, right: 60 },
+          shading: { type: ShadingType.CLEAR, color: 'auto', fill: 'FFFFFF' },
+          margins: { top: 50, bottom: 50, left: 80, right: 80 },
           children: [new Paragraph({
             bidirectional: rtl,
             alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-            children: [new TextRun({
-              text: text || ' ',
-              size: ptToHalfPt(Math.max(8, Math.min(14, fontSize))),
-              font: rtl ? 'Arial' : (cellItems[0]?.fontName || 'Arial'),
-              rightToLeft: rtl,
-            })],
+            spacing: { before: 0, after: 0, line: 240 },
+            children: [new TextRun({ text: text || ' ', size: ptToHalfPt(fontSize), font: normalizeFontName(sorted[0]?.fontName, rtl), bold, rightToLeft: rtl })],
           })],
         });
       }),
     });
   });
 
-  return new Table({
-    width: { size: ptToTwip(pageWidth - 80), type: WidthType.DXA },
-    rows,
-  });
+  return new Table({ width: { size: usableWidth, type: WidthType.DXA }, rows });
 }
 
 function buildParagraphFromLine(line, pageWidth, prevLine) {
-  const text = line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
+  const text = line.text;
   if (!text) return null;
   const rtl = line.isArabic;
   const avgFont = line.fontSize || 11;
-  const fontName = line.items.find(i => i.fontName)?.fontName || (rtl ? 'Arial' : 'Arial');
+  const fontName = normalizeFontName(line.items[0]?.fontName, rtl);
+  const bold = line.items.some(i => i.bold) || (avgFont >= 14 && text.length < 100);
 
-  // Estimate indentation from x position (40pt left margin baseline)
   const leftIndentPt = Math.max(0, line.minX - 40);
-  const indentTwip = ptToTwip(leftIndentPt);
+  const rightIndentPt = Math.max(0, (pageWidth - 40) - line.maxX);
+  const indentTwipLeft = ptToTwip(Math.min(leftIndentPt, pageWidth * 0.6));
+  const indentTwipRight = ptToTwip(Math.min(rightIndentPt, pageWidth * 0.6));
 
-  // Spacing before based on gap from previous line
-  let spacingBefore = 0;
+  let spacingBefore = 60;
   if (prevLine) {
     const gap = line.y - prevLine.y;
-    const normalGap = (prevLine.fontSize || 11) * 1.4;
-    if (gap > normalGap * 1.5) spacingBefore = ptToTwip(Math.min(gap - normalGap, 24));
+    const normal = (prevLine.fontSize || 11) * 1.5;
+    if (gap > normal * 1.6) spacingBefore = ptToTwip(Math.min(gap - normal, 18));
   }
 
-  const isBold = /bold|black|heavy/i.test(line.items.map(i=>i.fontName).join(' '));
-  const isHeading = avgFont >= 14 && text.length < 120;
-
-  const run = new TextRun({
-    text,
-    size: ptToHalfPt(Math.max(8, Math.min(28, avgFont))),
-    font: fontName,
-    bold: isBold || isHeading,
+  const runs = line.items.map(it => new TextRun({
+    text: it.str + ' ',
+    size: ptToHalfPt(it.fontSize || avgFont),
+    font: normalizeFontName(it.fontName, rtl),
+    bold: !!it.bold || bold,
+    italics: !!it.italic,
     rightToLeft: rtl,
-  });
+  }));
+  // trim last space
+  if (runs.length) { const last = line.items[line.items.length-1]; runs[runs.length-1] = new TextRun({ text: last.str, size: ptToHalfPt(last.fontSize || avgFont), font: normalizeFontName(last.fontName, rtl), bold: !!last.bold || bold, italics: !!last.italic, rightToLeft: rtl }); }
 
   return new Paragraph({
     bidirectional: rtl,
-    alignment: rtl ? AlignmentType.RIGHT : (isHeading ? AlignmentType.CENTER : AlignmentType.LEFT),
-    spacing: { before: spacingBefore, after: ptToTwip(Math.max(2, avgFont * 0.3)), line: 276 },
-    indent: rtl ? { right: indentTwip } : { left: indentTwip },
-    children: [run],
+    alignment: rtl ? AlignmentType.RIGHT : (bold && avgFont >= 14 ? AlignmentType.CENTER : AlignmentType.LEFT),
+    spacing: { before: spacingBefore, after: ptToTwip(Math.max(1.5, avgFont * 0.25)), line: 276 },
+    indent: rtl ? { right: indentTwipRight, left: ptToTwip(40) } : { left: indentTwipLeft, right: ptToTwip(40) },
+    children: runs,
   });
 }
 
-async function renderPageToPng(page, scale = 2.0) {
-  const viewport = page.getViewport({ scale });
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(viewport.width);
-  canvas.height = Math.round(viewport.height);
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-  return { data: new Uint8Array(await blob.arrayBuffer()), ptWidth: viewport.width / scale, ptHeight: viewport.height / scale };
-}
-
-export async function convertPdfToDocx(file, options = {}, onProgress) {
-  const { mode = 'editable' } = options; // 'editable' | 'visual'
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
-  const totalPages = pdf.numPages;
+async function buildEditableSections(pdf, totalPages, onProgress) {
   const sections = [];
-
   for (let i = 1; i <= totalPages; i++) {
-    if (onProgress) {
-      onProgress({ current: i, total: totalPages, percentage: Math.round((i / totalPages) * 100), status: mode === 'visual' ? `تحويل الصفحة ${i}/${totalPages}...` : `استخراج النصوص والهيكل من الصفحة ${i}/${totalPages}...` });
-    }
+    onProgress?.({ current: i, total: totalPages, percentage: Math.round((i / totalPages) * 100), status: `استخراج النصوص والجداول - صفحة ${i}/${totalPages}...` });
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 1.0 });
-    const ptWidth = viewport.width;
-    const ptHeight = viewport.height;
-
-    if (mode === 'visual') {
-      const rendered = await renderPageToPng(page, 2.0);
-      sections.push({
-        properties: { page: { size: { width: ptToTwip(ptWidth), height: ptToTwip(ptHeight) }, margin: { top: 0, right: 0, bottom: 0, left: 0 } } },
-        children: [new Paragraph({ spacing: { before: 0, after: 0 }, children: [new ImageRun({ data: rendered.data, transformation: { width: Math.round(ptWidth * 96 / 72), height: Math.round(ptHeight * 96 / 72) }, type: 'png' })] })],
-      });
-      continue;
-    }
-
+    const ptW = viewport.width, ptH = viewport.height;
     const textContent = await page.getTextContent({ normalizeWhitespace: false });
-    const items = getTextContentItems(textContent, viewport);
+    const items = getTextItems(textContent, viewport);
     const lines = groupIntoLines(items);
-    const blocks = detectTableBlocks(lines, ptWidth);
-
+    const blocks = detectTableBlocks(lines, ptW);
     const children = [];
     let prevLine = null;
     for (const block of blocks) {
       if (block.type === 'table') {
-        children.push(buildTableFromLines(block.lines, ptWidth));
-        children.push(new Paragraph({ spacing: { before: 120, after: 120 }, children: [] }));
+        children.push(buildTableFromLines(block.lines, ptW));
+        children.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
         prevLine = block.lines[block.lines.length - 1];
       } else {
-        const para = buildParagraphFromLine(block.line, ptWidth, prevLine);
-        if (para) children.push(para);
+        const p = buildParagraphFromLine(block.line, ptW, prevLine);
+        if (p) children.push(p);
         prevLine = block.line;
       }
     }
+    if (!children.length) children.push(new Paragraph({ children: [new TextRun({ text: ' ', size: 22 })] }));
+    sections.push({ properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: ptToTwip(36), right: ptToTwip(36), bottom: ptToTwip(36), left: ptToTwip(36) } } }, children });
+  }
+  return sections;
+}
 
-    if (children.length === 0) {
-      children.push(new Paragraph({ children: [new TextRun({ text: ' ', size: 22 })] }));
+async function buildHybridSections(pdf, totalPages, onProgress) {
+  // Hybrid: page image BEHIND (preserves exact visual appearance) + transparent selectable text layer on top
+  const sections = [];
+  for (let i = 1; i <= totalPages; i++) {
+    onProgress?.({ current: i, total: totalPages, percentage: Math.round((i / totalPages) * 100), status: `بناء طبقة Hybrid قابلة للتحديد - صفحة ${i}/${totalPages}...` });
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 1.0 });
+    const ptW = viewport.width, ptH = viewport.height;
+
+    // 1) High-res background image (visual fidelity)
+    const rendered = await renderPageToPng(page, 2.2);
+
+    // 2) Extract text items for invisible selectable layer
+    const textContent = await page.getTextContent({ normalizeWhitespace: false });
+    const items = getTextItems(textContent, viewport);
+    const lines = groupIntoLines(items);
+
+    const children = [];
+
+    // Background image anchored to page behind text
+    children.push(new Paragraph({
+      spacing: { before: 0, after: 0, line: 1 },
+      children: [new ImageRun({
+        data: rendered.data,
+        transformation: { width: ptToPx96(ptW), height: ptToPx96(ptH) },
+        type: 'png',
+        floating: {
+          horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+          verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
+          wrap: { type: TextWrappingType.BEHIND },
+          behindDocument: true,
+          zIndex: 0,
+        },
+      })],
+    }));
+
+    // Transparent selectable text overlay (white color, tiny but selectable - better: use exact position via spacing)
+    // We place text as normal paragraphs with minimal visibility tricks; use very light color close to white is bad over dark areas.
+    // Best practical approach: render text in normal black with 0pt outline? No. Use `color: "808080"`? visible.
+    // The user asked for "طبقة نص شفافة قابلة للتحديد" - we can use a very faint color or use the spec trick:
+    // set color to "FFFFFF" (white) - it's selectable when you drag over it. Over white bg invisible, over image it covers - not perfect.
+    // Better compromise: put text as editable paragraphs in a light transparent-ish approach is not supported. 
+    // We'll use color "FEFEFE" which is nearly invisible on white but still selectable; on dark image areas it will show faintly - acceptable tradeoff.
+    // More importantly, we place them as real editable TextRuns so user can select/copy/edit.
+    for (const line of lines) {
+      const rtl = line.isArabic;
+      const avgFont = line.fontSize || 11;
+      // Position approximation using before-spacing and indents
+      const leftIndentPt = Math.max(0, line.minX - 36);
+      let spacingBefore = 0;
+      // use a small spacing model
+      spacingBefore = 20;
+      const runs = line.items.map(it => new TextRun({
+        text: it.str + ' ',
+        size: ptToHalfPt(it.fontSize || avgFont),
+        font: normalizeFontName(it.fontName, rtl),
+        bold: !!it.bold,
+        italics: !!it.italic,
+        rightToLeft: rtl,
+        color: 'FDFDFD', // near-transparent white: selectable but minimally visible over background image
+      }));
+      if (runs.length) {
+        const last = line.items[line.items.length - 1];
+        runs[runs.length - 1] = new TextRun({ text: last.str, size: ptToHalfPt(last.fontSize || avgFont), font: normalizeFontName(last.fontName, rtl), bold: !!last.bold, italics: !!last.italic, rightToLeft: rtl, color: 'FDFDFD' });
+      }
+      children.push(new Paragraph({
+        bidirectional: rtl,
+        alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
+        spacing: { before: spacingBefore, after: 0, line: 240 },
+        indent: rtl ? { right: ptToTwip(Math.max(0, ptW - line.maxX - 36)) } : { left: ptToTwip(leftIndentPt) },
+        children: runs,
+      }));
     }
 
     sections.push({
-      properties: {
-        page: {
-          size: { width: ptToTwip(ptWidth), height: ptToTwip(ptHeight) },
-          margin: { top: ptToTwip(40), right: ptToTwip(40), bottom: ptToTwip(40), left: ptToTwip(40) },
-        },
-      },
+      properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: ptToTwip(36), right: ptToTwip(36), bottom: ptToTwip(36), left: ptToTwip(36) } } },
       children,
     });
   }
+  return sections;
+}
+
+async function buildVisualSections(pdf, totalPages, onProgress) {
+  const sections = [];
+  for (let i = 1; i <= totalPages; i++) {
+    onProgress?.({ current: i, total: totalPages, percentage: Math.round((i / totalPages) * 100), status: `تحويل بصري - صفحة ${i}/${totalPages}...` });
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 1.0 });
+    const ptW = viewport.width, ptH = viewport.height;
+    const rendered = await renderPageToPng(page, 2.2);
+    sections.push({
+      properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: 0, right: 0, bottom: 0, left: 0 } } },
+      children: [new Paragraph({ spacing: { before: 0, after: 0 }, children: [new ImageRun({ data: rendered.data, transformation: { width: ptToPx96(ptW), height: ptToPx96(ptH) }, type: 'png' })] })],
+    });
+  }
+  return sections;
+}
+
+export async function convertPdfToDocx(file, options = {}, onProgress) {
+  const { mode = 'hybrid' } = options; // 'editable' | 'hybrid' | 'visual'
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  const totalPages = pdf.numPages;
+
+  let sections;
+  if (mode === 'visual') sections = await buildVisualSections(pdf, totalPages, onProgress);
+  else if (mode === 'editable') sections = await buildEditableSections(pdf, totalPages, onProgress);
+  else sections = await buildHybridSections(pdf, totalPages, onProgress);
 
   const doc = new Document({
     creator: 'OptiMerge PDF',
     title: file.name.replace(/\.pdf$/i, ''),
-    description: 'Converted from PDF with editable text and tables',
-    styles: {
-      default: {
-        document: {
-          run: { font: 'Arial', size: 22 },
-          paragraph: { spacing: { line: 276 } },
-        },
-      },
-    },
+    description: 'Converted from PDF',
+    styles: { default: { document: { run: { font: 'Arial', size: 22 }, paragraph: { spacing: { line: 276 } } } } },
     sections,
   });
 
