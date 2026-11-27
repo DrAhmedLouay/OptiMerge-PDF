@@ -241,8 +241,11 @@ function inferColumnBoundaries(tableLines, pageWidth, margin) {
 }
 
 function buildTableFromLines(tableLines, pageWidth, margin = 36) {
-  const { colCount, colW, centers } = inferColumnBoundaries(tableLines, pageWidth, margin);
-  const usableWidth = ptToTwip(pageWidth - margin * 2);
+  const { colCount, centers } = inferColumnBoundaries(tableLines, pageWidth, margin);
+  const tableLeft = Math.max(margin, Math.min(...tableLines.map(l => l.minX)) - 4);
+  const tableRight = Math.min(pageWidth - margin, Math.max(...tableLines.map(l => l.maxX)) + 4);
+  const usableWidth = ptToTwip(Math.max(100, tableRight - tableLeft));
+  const colW = Math.floor(usableWidth / colCount);
 
   const rows = tableLines.map(line => {
     const clusters = clusterItems(line.items);
@@ -261,14 +264,18 @@ function buildTableFromLines(tableLines, pageWidth, margin = 36) {
         const fontSize = sorted.length ? sorted.reduce((s,i)=>s+i.fontSize,0)/sorted.length : 11;
         const bold = sorted.some(i => i.bold);
         const font = normalizeFontName(sorted[0]?.fontName, rtl);
-        const cellRuns = sorted.length ? sorted.map((it, idx) => new TextRun({
-          text: idx === sorted.length - 1 ? cleanText(it.str) : cleanText(it.str) + ' ',
-          size: ptToHalfPt(it.fontSize || fontSize),
-          font: normalizeFontName(it.fontName, rtl),
-          bold: !!it.bold || bold,
-          italics: !!it.italic,
-          rightToLeft: rtl,
-        })) : [new TextRun({ text: ' ', size: ptToHalfPt(fontSize), font, rightToLeft: rtl })];
+        const cellRuns = sorted.length ? sorted.map((it, idx) => {
+          const f = normalizeFontName(it.fontName, rtl);
+          const csFont = rtl ? (f === 'Arial' ? 'Traditional Arabic' : f) : 'Arial';
+          return new TextRun({
+            text: idx === sorted.length - 1 ? cleanText(it.str) : cleanText(it.str) + ' ',
+            size: ptToHalfPt(it.fontSize || fontSize),
+            font: { name: f, hint: rtl ? 'cs' : 'default', eastAsia: f, hAnsi: f, ascii: f, cs: csFont },
+            bold: !!it.bold || bold,
+            italics: !!it.italic,
+            rightToLeft: rtl,
+          });
+        }) : [new TextRun({ text: ' ', size: ptToHalfPt(fontSize), font: { name: font, cs: rtl ? font : 'Arial' }, rightToLeft: rtl })];
         return new TableCell({
           width: { size: colW, type: WidthType.DXA },
           borders: {
@@ -358,31 +365,27 @@ async function buildEditableSections(pdf, totalPages, onProgress) {
     for (const block of blocks) {
       if (block.type === 'table') {
         const tableTop = Math.min(...block.lines.map(l => l.y));
-        const tableBottom = Math.max(...block.lines.map(l => l.y + (l.fontSize || 11) * 1.6));
-        const tableHeight = Math.max(40, tableBottom - tableTop + 12);
+        const tableBottom = Math.max(...block.lines.map(l => l.y + (l.fontSize || 11) * 1.8));
+        const tableLeft = Math.max(margin, Math.min(...block.lines.map(l => l.minX)) - 4);
+        const tableRight = Math.min(ptW - margin, Math.max(...block.lines.map(l => l.maxX)) + 4);
+        const tableW = Math.max(100, tableRight - tableLeft);
+        const tableH = Math.max(30, tableBottom - tableTop + 10);
         const table = buildTableFromLines(block.lines, ptW, margin);
 
-        // Absolute-positioned table via Textbox for layout fidelity
         children.push(new Paragraph({
           spacing: { before: 0, after: 0, line: 1 },
-          frame: {
-            type: 'absolute',
-            position: { x: ptToTwip(margin), y: ptToTwip(tableTop) },
-            width: ptToTwip(ptW - margin * 2),
-            height: ptToTwip(tableHeight),
-            anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE },
-          },
-          children: [new TextRun({ text: '' })],
+          children: [new Textbox({
+            children: [table],
+            style: {
+              width: Math.round(tableW * 12700),
+              height: Math.round(tableH * 12700),
+              position: {
+                horizontal: { relative: 'page', offset: Math.round(tableLeft * 12700) },
+                vertical: { relative: 'page', offset: Math.round(tableTop * 12700) },
+              },
+            },
+          })],
         }));
-        // Insert actual editable table after anchor paragraph (Word renders table in flow; we also provide framed anchor for position hint)
-        // Better: put table directly - many readers ignore table-in-textbox. Use table with exact indent and before spacing.
-        // Replace: remove the anchor hack and insert flow table with precise spacing using a spacer paragraph.
-        children.pop();
-        children.push(new Paragraph({
-          spacing: { before: ptToTwip(Math.max(0, tableTop - margin)), after: 0, line: 1 },
-          children: [new TextRun({ text: '', size: 2 })],
-        }));
-        children.push(table);
       } else {
         const line = block.line;
         const rtl = line.isArabic;
