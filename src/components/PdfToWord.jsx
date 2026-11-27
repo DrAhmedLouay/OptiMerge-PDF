@@ -4,6 +4,7 @@ import { convertPdfToDocx } from '../utils/pdfToWord';
 
 export default function PdfToWord({ t, lang }) {
   const [file, setFile] = useState(null);
+  const [mode, setMode] = useState('editable'); // 'editable' | 'visual'
   const [isConverting, setIsConverting] = useState(false);
   const [progress, setProgress] = useState(null);
   const [result, setResult] = useState(null);
@@ -28,7 +29,7 @@ export default function PdfToWord({ t, lang }) {
     setError(null);
     setResult(null);
     try {
-      const res = await convertPdfToDocx(file, { mode: 'visual' }, (p) => setProgress(p));
+      const res = await convertPdfToDocx(file, { mode }, (p) => setProgress(p));
       const url = URL.createObjectURL(res.blob);
       setResult({ ...res, url });
     } catch (err) {
@@ -72,17 +73,29 @@ export default function PdfToWord({ t, lang }) {
             </h2>
             <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-3xl leading-relaxed">
               {lang === 'ar'
-                ? 'تحويل ملفات الـ PDF إلى مستندات Word مع الحفاظ التام على نفس التنظيم والستايل والتخطيط واللغة العربية والخطوط قدر الإمكان. يتم عرض كل صفحة بدقة عالية داخل ملف Word بنفس أبعاد الصفحة الأصلية لضمان عدم حدوث أي تغيير في الشكل.'
-                : 'Convert PDF files to Word documents while preserving the exact layout, style, Arabic text, and fonts. Each page is rendered at high fidelity into Word with the original page dimensions to ensure no visual changes.'}
+                ? 'تحويل PDF إلى Word مع نصوص وجداول قابلة للتحرير والتعديل بسلاسة. يستخرج المحرك النصوص العربية والإنجليزية والخطوط والأحجام والمحاذاة ويعيد بناء الجداول كبنية Table قابلة للتعديل في ملف .docx، مع الحفاظ على تنظيم الصفحة قدر الإمكان.'
+                : 'Convert PDF to Word with smoothly editable text and tables. The engine extracts Arabic/English text, fonts, sizes, alignment, and rebuilds detected tables as editable Word tables while preserving page structure as much as possible.'}
             </p>
           </div>
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ الحفاظ على التنسيق والستايل</span>
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ دعم اللغة العربية والخطوط</span>
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ نفس أبعاد الصفحة الأصلية</span>
+          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ نصوص قابلة للتعديل والنسخ</span>
+          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ جداول قابلة للتحرير Table</span>
+          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ دعم العربية RTL والخطوط</span>
           <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">✓ معالجة محلية 100%</span>
+        </div>
+
+        <div className="mt-5 p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
+          <p className="text-xs font-bold text-slate-200 mb-2">{lang === 'ar' ? 'وضع التحويل' : 'Conversion Mode'}</p>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button onClick={() => setMode('editable')} className={`flex-1 px-4 py-3 rounded-xl text-xs font-bold border transition-all ${mode==='editable' ? 'bg-accent-500/20 border-accent-500/50 text-accent-200' : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'}`}>
+              {lang === 'ar' ? 'نصوص وجداول قابلة للتحرير (موصى به)' : 'Editable text & tables (Recommended)'}
+            </button>
+            <button onClick={() => setMode('visual')} className={`flex-1 px-4 py-3 rounded-xl text-xs font-bold border transition-all ${mode==='visual' ? 'bg-accent-500/20 border-accent-500/50 text-accent-200' : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'}`}>
+              {lang === 'ar' ? 'مطابقة بصرية 100% (صفحات كصور)' : '100% visual fidelity (image pages)'}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -148,7 +161,7 @@ export default function PdfToWord({ t, lang }) {
             <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-emerald-300 text-sm font-semibold">
                 <CheckCircle className="w-5 h-5 text-emerald-400" />
-                <span>{lang === 'ar' ? `تم التحويل بنجاح (${result.pageCount} صفحة) مع الحفاظ على التنسيق` : `Converted successfully (${result.pageCount} pages) with layout preserved`}</span>
+                <span>{lang === 'ar' ? `تم التحويل بنجاح (${result.pageCount} صفحة) - ${mode==='editable' ? 'نصوص وجداول قابلة للتعديل' : 'مطابقة بصرية كاملة'}` : `Converted successfully (${result.pageCount} pages) - ${mode==='editable' ? 'Editable text & tables' : 'Full visual fidelity'}`}</span>
               </div>
               <button onClick={download} className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-bold text-xs shadow-lg shadow-brand-500/20 transition-all">
                 <Download className="w-4 h-4" />
