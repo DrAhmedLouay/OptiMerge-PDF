@@ -178,14 +178,14 @@ function columnsCompatible(refClusters, clusters, pageWidth) {
   return matches >= Math.min(refCenters.length, centers.length) - 1;
 }
 
-function buildTableFromLines(tableLines, pageWidth) {
+function buildTableFromLines(tableLines, pageWidth, margin = 36) {
   const allClusters = tableLines.map(l => clusterByX(l.items));
   const maxCols = Math.max(...allClusters.map(c => c.length));
   let refCenters = [];
   for (const clusters of allClusters) { if (clusters.length === maxCols) { refCenters = clusters.map(c => (c.minX + c.maxX) / 2); break; } }
   if (!refCenters.length) refCenters = allClusters[0].map(c => (c.minX + c.maxX) / 2);
   const colCount = refCenters.length;
-  const usableWidth = ptToTwip(pageWidth - 80);
+  const usableWidth = ptToTwip(pageWidth - margin * 2);
   const colWidth = Math.floor(usableWidth / colCount);
 
   const rows = tableLines.map(line => {
@@ -204,21 +204,29 @@ function buildTableFromLines(tableLines, pageWidth) {
         const rtl = isArabic(text);
         const fontSize = sorted.length ? sorted.reduce((s,i)=>s+i.fontSize,0)/sorted.length : 11;
         const bold = sorted.some(i => i.bold);
+        const cellRuns = sorted.length ? sorted.map((it, idx) => new TextRun({
+          text: idx === sorted.length - 1 ? it.str : it.str + ' ',
+          size: ptToHalfPt(it.fontSize || fontSize),
+          font: normalizeFontName(it.fontName, rtl),
+          bold: !!it.bold || bold,
+          italics: !!it.italic,
+          rightToLeft: rtl,
+        })) : [new TextRun({ text: ' ', size: ptToHalfPt(fontSize) })];
         return new TableCell({
           width: { size: colWidth, type: WidthType.DXA },
           borders: {
-            top: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
-            bottom: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
-            left: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
-            right: { style: BorderStyle.SINGLE, size: 1, color: 'BFBFBF' },
+            top: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+            bottom: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+            left: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+            right: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
           },
           shading: { type: ShadingType.CLEAR, color: 'auto', fill: 'FFFFFF' },
-          margins: { top: 50, bottom: 50, left: 80, right: 80 },
+          margins: { top: 40, bottom: 40, left: 70, right: 70 },
           children: [new Paragraph({
             bidirectional: rtl,
             alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-            spacing: { before: 0, after: 0, line: 240 },
-            children: [new TextRun({ text: text || ' ', size: ptToHalfPt(fontSize), font: normalizeFontName(sorted[0]?.fontName, rtl), bold, rightToLeft: rtl })],
+            spacing: { before: 20, after: 20, line: 240 },
+            children: cellRuns,
           })],
         });
       }),
@@ -228,44 +236,49 @@ function buildTableFromLines(tableLines, pageWidth) {
   return new Table({ width: { size: usableWidth, type: WidthType.DXA }, rows });
 }
 
-function buildParagraphFromLine(line, pageWidth, prevLine) {
+function buildParagraphFromLine(line, pageWidth, margin, prevBottom) {
   const text = line.text;
-  if (!text) return null;
+  if (!text) return { para: null, bottom: prevBottom };
   const rtl = line.isArabic;
   const avgFont = line.fontSize || 11;
-  const fontName = normalizeFontName(line.items[0]?.fontName, rtl);
   const bold = line.items.some(i => i.bold) || (avgFont >= 14 && text.length < 100);
 
-  const leftIndentPt = Math.max(0, line.minX - 40);
-  const rightIndentPt = Math.max(0, (pageWidth - 40) - line.maxX);
-  const indentTwipLeft = ptToTwip(Math.min(leftIndentPt, pageWidth * 0.6));
-  const indentTwipRight = ptToTwip(Math.min(rightIndentPt, pageWidth * 0.6));
+  const contentLeft = margin;
+  const contentRight = pageWidth - margin;
+  const lineLeft = Math.max(contentLeft, line.minX);
+  const lineRight = Math.min(contentRight, line.maxX);
 
-  let spacingBefore = 60;
-  if (prevLine) {
-    const gap = line.y - prevLine.y;
-    const normal = (prevLine.fontSize || 11) * 1.5;
-    if (gap > normal * 1.6) spacingBefore = ptToTwip(Math.min(gap - normal, 18));
-  }
+  const leftIndentPt = Math.max(0, lineLeft - contentLeft);
+  const rightIndentPt = Math.max(0, contentRight - lineRight);
 
-  const runs = line.items.map(it => new TextRun({
-    text: it.str + ' ',
-    size: ptToHalfPt(it.fontSize || avgFont),
-    font: normalizeFontName(it.fontName, rtl),
-    bold: !!it.bold || bold,
-    italics: !!it.italic,
-    rightToLeft: rtl,
-  }));
-  // trim last space
-  if (runs.length) { const last = line.items[line.items.length-1]; runs[runs.length-1] = new TextRun({ text: last.str, size: ptToHalfPt(last.fontSize || avgFont), font: normalizeFontName(last.fontName, rtl), bold: !!last.bold || bold, italics: !!last.italic, rightToLeft: rtl }); }
+  // Vertical spacing: distance from previous block bottom to this line top
+  const gapPt = Math.max(0, line.y - (prevBottom ?? margin));
+  const spacingBeforeTwip = ptToTwip(Math.min(Math.max(0, gapPt - avgFont * 0.2), 120));
 
-  return new Paragraph({
-    bidirectional: rtl,
-    alignment: rtl ? AlignmentType.RIGHT : (bold && avgFont >= 14 ? AlignmentType.CENTER : AlignmentType.LEFT),
-    spacing: { before: spacingBefore, after: ptToTwip(Math.max(1.5, avgFont * 0.25)), line: 276 },
-    indent: rtl ? { right: indentTwipRight, left: ptToTwip(40) } : { left: indentTwipLeft, right: ptToTwip(40) },
-    children: runs,
+  const runs = line.items.map((it, idx) => {
+    const isLast = idx === line.items.length - 1;
+    return new TextRun({
+      text: isLast ? it.str : it.str + ' ',
+      size: ptToHalfPt(it.fontSize || avgFont),
+      font: normalizeFontName(it.fontName, rtl),
+      bold: !!it.bold || (bold && line.items.length === 1),
+      italics: !!it.italic,
+      rightToLeft: rtl,
+    });
   });
+
+  const para = new Paragraph({
+    bidirectional: rtl,
+    alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
+    spacing: { before: spacingBeforeTwip, after: 0, line: Math.max(240, ptToTwip(avgFont * 1.15)) },
+    indent: {
+      left: rtl ? ptToTwip(rightIndentPt) : ptToTwip(leftIndentPt),
+      right: rtl ? ptToTwip(leftIndentPt) : ptToTwip(rightIndentPt),
+    },
+    children: runs.length ? runs : [new TextRun({ text: ' ', size: ptToHalfPt(avgFont) })],
+  });
+  const bottom = line.y + avgFont * 1.2;
+  return { para, bottom };
 }
 
 async function buildEditableSections(pdf, totalPages, onProgress) {
@@ -275,25 +288,32 @@ async function buildEditableSections(pdf, totalPages, onProgress) {
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 1.0 });
     const ptW = viewport.width, ptH = viewport.height;
+    const margin = 36;
     const textContent = await page.getTextContent({ normalizeWhitespace: false });
     const items = getTextItems(textContent, viewport);
     const lines = groupIntoLines(items);
     const blocks = detectTableBlocks(lines, ptW);
     const children = [];
-    let prevLine = null;
+    let prevBottom = margin;
+
     for (const block of blocks) {
       if (block.type === 'table') {
-        children.push(buildTableFromLines(block.lines, ptW));
-        children.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
-        prevLine = block.lines[block.lines.length - 1];
+        const tableTop = Math.min(...block.lines.map(l => l.y));
+        const gapPt = Math.max(0, tableTop - prevBottom);
+        if (gapPt > 4) {
+          children.push(new Paragraph({ spacing: { before: ptToTwip(Math.min(gapPt, 100)), after: 0 }, children: [new TextRun({ text: '', size: 2 })] }));
+        }
+        children.push(buildTableFromLines(block.lines, ptW, margin));
+        const lastLine = block.lines[block.lines.length - 1];
+        prevBottom = lastLine.y + (lastLine.fontSize || 11) * 1.4;
+        children.push(new Paragraph({ spacing: { before: 40, after: 0 }, children: [new TextRun({ text: '', size: 2 })] }));
       } else {
-        const p = buildParagraphFromLine(block.line, ptW, prevLine);
-        if (p) children.push(p);
-        prevLine = block.line;
+        const { para, bottom } = buildParagraphFromLine(block.line, ptW, margin, prevBottom);
+        if (para) { children.push(para); prevBottom = bottom; }
       }
     }
     if (!children.length) children.push(new Paragraph({ children: [new TextRun({ text: ' ', size: 22 })] }));
-    sections.push({ properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: ptToTwip(36), right: ptToTwip(36), bottom: ptToTwip(36), left: ptToTwip(36) } } }, children });
+    sections.push({ properties: { page: { size: { width: ptToTwip(ptW), height: ptToTwip(ptH) }, margin: { top: ptToTwip(margin), right: ptToTwip(margin), bottom: ptToTwip(margin), left: ptToTwip(margin) } } }, children });
   }
   return sections;
 }
