@@ -2,8 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import {
   Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType,
   Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType,
-  Textbox, TextWrappingType, VerticalPositionRelativeFrom, HorizontalPositionRelativeFrom,
-  FrameAnchorType, TableLayoutType
+  Textbox, TableLayoutType, FrameAnchorType
 } from 'docx';
 
 if (typeof window !== 'undefined') {
@@ -328,6 +327,19 @@ async function renderPageToImage(page, scale = 2.0) {
   return { data: new Uint8Array(await blob.arrayBuffer()), ptWidth: viewport.width / scale, ptHeight: viewport.height / scale };
 }
 
+function makeTextRun(it, fallbackSize, rtl, forceBold = false) {
+  const font = normalizeFontName(it.fontName, rtl);
+  const size = ptToHalfPt(it.fontSize || fallbackSize);
+  return new TextRun({
+    text: cleanText(it.str),
+    size,
+    font: { name: font, hint: rtl ? 'cs' : 'default', eastAsia: font, hAnsi: font, ascii: font, cs: rtl ? font : 'Arial' },
+    bold: !!it.bold || forceBold,
+    italics: !!it.italic,
+    rightToLeft: rtl,
+  });
+}
+
 async function buildEditableSections(pdf, totalPages, onProgress) {
   const sections = [];
   for (let i = 1; i <= totalPages; i++) {
@@ -335,76 +347,100 @@ async function buildEditableSections(pdf, totalPages, onProgress) {
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 1.0 });
     const ptW = viewport.width, ptH = viewport.height;
-    const margin = 36;
+    const margin = 24;
     const textContent = await page.getTextContent({ normalizeWhitespace: false, includeMarkedContent: true });
     const items = getTextItems(textContent, viewport);
     const lines = groupIntoLines(items);
     const blocks = detectTableBlocks(lines, ptW);
 
     const children = [];
-    let prevBottom = margin;
 
     for (const block of blocks) {
       if (block.type === 'table') {
         const tableTop = Math.min(...block.lines.map(l => l.y));
-        const gap = Math.max(0, tableTop - prevBottom);
-        if (gap > 6) children.push(new Paragraph({ spacing: { before: ptToTwip(Math.min(gap, 80)), after: 0 }, children: [new TextRun({ text: '', size: 2 })] }));
-
+        const tableBottom = Math.max(...block.lines.map(l => l.y + (l.fontSize || 11) * 1.6));
+        const tableHeight = Math.max(40, tableBottom - tableTop + 12);
         const table = buildTableFromLines(block.lines, ptW, margin);
-        // Place table in an absolute-positioned textbox for layout stability
-        const tableBottom = Math.max(...block.lines.map(l => l.y + (l.fontSize||11)*1.5));
-        const tableHeight = Math.max(40, tableBottom - tableTop + 20);
-        const leftOffsetEmu = ptToTwip(margin) * 635; // twip to EMU approx? No, textbox uses dx/dy in EMU or pt depending. docx Textbox style uses dxa-like? Let's use frame approach via paragraph
-        // Simpler: insert table directly (tables flow well in Word). Add indent via tableIndent
+
+        // Absolute-positioned table via Textbox for layout fidelity
+        children.push(new Paragraph({
+          spacing: { before: 0, after: 0, line: 1 },
+          frame: {
+            type: 'absolute',
+            position: { x: ptToTwip(margin), y: ptToTwip(tableTop) },
+            width: ptToTwip(ptW - margin * 2),
+            height: ptToTwip(tableHeight),
+            anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE },
+          },
+          children: [new TextRun({ text: '' })],
+        }));
+        // Insert actual editable table after anchor paragraph (Word renders table in flow; we also provide framed anchor for position hint)
+        // Better: put table directly - many readers ignore table-in-textbox. Use table with exact indent and before spacing.
+        // Replace: remove the anchor hack and insert flow table with precise spacing using a spacer paragraph.
+        children.pop();
+        children.push(new Paragraph({
+          spacing: { before: ptToTwip(Math.max(0, tableTop - margin)), after: 0, line: 1 },
+          children: [new TextRun({ text: '', size: 2 })],
+        }));
         children.push(table);
-        prevBottom = tableBottom + 4;
       } else {
         const line = block.line;
         const rtl = line.isArabic;
         const avgFont = line.fontSize || 11;
-        const gap = Math.max(0, line.y - prevBottom);
-        const spacingBefore = ptToTwip(Math.min(Math.max(0, gap - avgFont * 0.15), 140));
+        const clusters = clusterItems(line.items, Math.max(16, avgFont * 2.0));
 
-        const contentLeft = margin;
-        const contentRight = ptW - margin;
-        const clusters = clusterItems(line.items, Math.max(18, avgFont * 2.2));
-
-        // For multi-cluster lines (columns/tabs), create runs with tab/spaces and preserve positions
-        let paraChildren;
+        // Build runs preserving per-item font/RTL
+        let runs = [];
         if (clusters.length > 1) {
-          paraChildren = [];
           clusters.forEach((cl, ci) => {
-            if (ci > 0) paraChildren.push(new TextRun({ text: '\t', size: ptToHalfPt(avgFont) }));
-            paraChildren.push(...makeRunsForCluster(cl));
+            if (ci > 0) runs.push(new TextRun({ text: '   ', size: ptToHalfPt(avgFont) }));
+            cl.items.sort((a,b)=>a.x-b.x).forEach((it, idx) => {
+              const isLast = idx === cl.items.length - 1;
+              const font = normalizeFontName(it.fontName, rtl || it.isArabic);
+              const itemRtl = rtl || it.isArabic;
+              runs.push(new TextRun({
+                text: isLast ? cleanText(it.str) : cleanText(it.str) + ' ',
+                size: ptToHalfPt(it.fontSize || avgFont),
+                font: { name: font, hint: itemRtl ? 'cs' : 'default', eastAsia: font, hAnsi: font, ascii: font, cs: itemRtl ? (font === 'Arial' ? 'Traditional Arabic' : font) : 'Arial' },
+                bold: !!it.bold || (avgFont >= 15 && line.text.length < 90),
+                italics: !!it.italic,
+                rightToLeft: itemRtl,
+              }));
+            });
           });
         } else {
-          paraChildren = line.items.sort((a,b)=>a.x-b.x).map((it, idx, arr) => new TextRun({
-            text: idx === arr.length - 1 ? cleanText(it.str) : cleanText(it.str) + ' ',
-            size: ptToHalfPt(it.fontSize || avgFont),
-            font: normalizeFontName(it.fontName, rtl),
-            bold: !!it.bold || (avgFont >= 15 && line.text.length < 90),
-            italics: !!it.italic,
-            rightToLeft: rtl,
-          }));
+          runs = line.items.sort((a,b)=>a.x-b.x).map((it, idx, arr) => {
+            const itemRtl = rtl || it.isArabic;
+            const font = normalizeFontName(it.fontName, itemRtl);
+            return new TextRun({
+              text: idx === arr.length - 1 ? cleanText(it.str) : cleanText(it.str) + ' ',
+              size: ptToHalfPt(it.fontSize || avgFont),
+              font: { name: font, hint: itemRtl ? 'cs' : 'default', eastAsia: font, hAnsi: font, ascii: font, cs: itemRtl ? (font === 'Arial' ? 'Traditional Arabic' : font) : 'Arial' },
+              bold: !!it.bold || (avgFont >= 15 && line.text.length < 90),
+              italics: !!it.italic,
+              rightToLeft: itemRtl,
+            });
+          });
         }
 
-        const lineLeft = Math.max(contentLeft, line.minX);
-        const lineRight = Math.min(contentRight, line.maxX);
-        const leftIndent = Math.max(0, lineLeft - contentLeft);
-        const rightIndent = Math.max(0, contentRight - lineRight);
+        const lineWidth = Math.max(100, Math.min(ptW - margin * 2, (line.maxX - line.minX) + 20));
+        const xPos = Math.max(margin, Math.min(ptW - margin - 100, line.minX));
+        const yPos = Math.max(margin, Math.min(ptH - margin - 20, line.y));
 
+        // Absolute framed paragraph - preserves exact layout position
         children.push(new Paragraph({
           bidirectional: rtl,
           alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-          spacing: { before: spacingBefore, after: 0, line: Math.max(240, ptToTwip(avgFont * 1.2)), lineRule: 'auto' },
-          indent: {
-            left: ptToTwip(rtl ? rightIndent : leftIndent),
-            right: ptToTwip(rtl ? leftIndent : rightIndent),
+          frame: {
+            type: 'absolute',
+            position: { x: ptToTwip(xPos), y: ptToTwip(yPos) },
+            width: ptToTwip(lineWidth),
+            height: ptToTwip(Math.max(avgFont * 1.6, 14)),
+            anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE },
           },
-          tabStops: clusters.length > 1 ? clusters.slice(1).map(cl => ({ type: 'left', position: ptToTwip(Math.max(0, cl.minX - contentLeft)) })) : undefined,
-          children: paraChildren.length ? paraChildren : [new TextRun({ text: ' ', size: 22 })],
+          spacing: { before: 0, after: 0, line: 240 },
+          children: runs.length ? runs : [new TextRun({ text: ' ', size: 22 })],
         }));
-        prevBottom = line.y + avgFont * 1.15;
       }
     }
 
